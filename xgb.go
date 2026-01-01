@@ -70,6 +70,8 @@ type Conn struct {
 	// Extensions is a map from extension name to major opcode. It should
 	// not be used. It is exported for use in the extension sub-packages.
 	Extensions map[string]byte
+
+	idRangeFunc func(*Conn) (uint32, uint32, error)
 }
 
 // NewConn creates a new connection instance. It initializes locks, data
@@ -84,6 +86,7 @@ func NewConn() (*Conn, error) {
 // If 'display' is empty it will be taken from os.Getenv("DISPLAY").
 //
 // Examples:
+//
 //	NewConn(":1") -> net.Dial("unix", "", "/tmp/.X11-unix/X1")
 //	NewConn("/tmp/launch-12/:0") -> net.Dial("unix", "", "/tmp/launch-12/:0")
 //	NewConn("hostname:2.1") -> net.Dial("tcp", "", "hostname:6002")
@@ -138,6 +141,10 @@ func postNewConn(conn *Conn) (*Conn, error) {
 // Close gracefully closes the connection to the X server.
 func (c *Conn) Close() {
 	close(c.reqChan)
+}
+
+func (c *Conn) SetIDRangeFunc(f func(*Conn) (uint32, uint32, error)) {
+	c.idRangeFunc = f
 }
 
 // Event is an interface that can contain any of the events returned by the
@@ -217,8 +224,8 @@ type xid struct {
 // This needs to be updated to use the XC Misc extension once we run out of
 // new ids.
 // Thanks to libxcb/src/xcb_xid.c. This code is greatly inspired by it.
-func (conn *Conn) generateXIds() {
-	defer close(conn.xidChan)
+func (c *Conn) generateXIds() {
+	defer close(c.xidChan)
 
 	// This requires some explanation. From the horse's mouth:
 	// "The resource-id-mask contains a single contiguous set of bits (at least
@@ -236,21 +243,35 @@ func (conn *Conn) generateXIds() {
 	// 00111000 & 11001000 = 00001000.
 	// And we use that value to increment the last resource id to get a new one.
 	// (And then, of course, we OR it with resource-id-base.)
-	inc := conn.setupResourceIdMask & -conn.setupResourceIdMask
-	limit := conn.setupResourceIdMask
+	inc := c.setupResourceIdMask & -c.setupResourceIdMask
+	limit := c.setupResourceIdMask
 	last := uint32(0)
 	for {
-		// TODO: Use the XC Misc extension to look for released ids.
-		if last > 0 && last >= limit-inc+1 {
-			conn.xidChan <- xid{
-				id:  0,
-				err: errors.New("there are no more available resource identifiers"),
+		if last >= limit-inc+1 {
+			if c.idRangeFunc == nil {
+				c.xidChan <- xid{
+					id:  0,
+					err: errors.New("there are no more available resource identifiers, and no re-use configured"),
+				}
+				return
 			}
+
+			start, count, err := c.idRangeFunc(c)
+			if err != nil {
+				c.xidChan <- xid{
+					id:  0,
+					err: errors.New("error getting ID re-use: " + err.Error()),
+				}
+				return
+			}
+
+			last = start
+			limit = start + (count-1)*inc
 		}
 
 		last += inc
-		conn.xidChan <- xid{
-			id:  last | conn.setupResourceIdBase,
+		c.xidChan <- xid{
+			id:  last | c.setupResourceIdBase,
 			err: nil,
 		}
 	}
