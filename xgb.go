@@ -237,15 +237,14 @@ func (conn *Conn) generateXIds() {
 	// And we use that value to increment the last resource id to get a new one.
 	// (And then, of course, we OR it with resource-id-base.)
 	inc := conn.setupResourceIdMask & -conn.setupResourceIdMask
-	max := conn.setupResourceIdMask
+	limit := conn.setupResourceIdMask
 	last := uint32(0)
 	for {
 		// TODO: Use the XC Misc extension to look for released ids.
-		if last > 0 && last >= max-inc+1 {
+		if last > 0 && last >= limit-inc+1 {
 			conn.xidChan <- xid{
-				id: 0,
-				err: errors.New("There are no more available resource" +
-					"identifiers."),
+				id:  0,
+				err: errors.New("there are no more available resource identifiers"),
 			}
 		}
 
